@@ -1,10 +1,12 @@
-import pandas as pd
-from pathlib import Path
-
 import io
 import time
+import torch
+import mlflow
+import mlflow.pytorch
 import pandas as pd
+import numpy as np
 from PIL import Image
+from pathlib import Path
 from datasets import Dataset
 from transformers import (
     AutoImageProcessor,
@@ -12,14 +14,12 @@ from transformers import (
     TrainingArguments,
     Trainer
 )
-import torch
-import numpy as np
 from sklearn.metrics import accuracy_score
-import mlflow
-import mlflow.pytorch
 from sklearn.preprocessing import LabelEncoder
 from mlflow.models.signature import infer_signature
-import mlflow.pytorch
+from utils.set_logger import MyLogger
+
+logger = MyLogger()
 
 # Add device selection logic after the imports
 def get_device():
@@ -32,12 +32,12 @@ def get_device():
 
 # Get the appropriate device
 device = get_device()
-print(f"Using device: {device}")
+logger.info(f"Using device: {device}")
 
 # Load the CSV and convert image strings to binary
 file_path = Path("resources", "test_02_ml.csv")
 df = pd.read_csv(file_path)
-print(df.info())
+logger.info(df.info())
 
 # Convert string representation of binary data back to binary
 def hex_str_to_bytes(hex_str):
@@ -52,9 +52,9 @@ df['image'] = df['image'].apply(hex_str_to_bytes)
 # Remove any rows where image conversion failed
 df = df.dropna(subset=['image'])
 
-print(f"Processed {len(df)} images successfully")
-print(df.info())
-print(df.head())
+logger.info(f"Processed {len(df)} images successfully")
+logger.info(df.info())
+logger.info(df.head())
 
 # Encode the labels
 label_encoder = LabelEncoder()
@@ -65,15 +65,15 @@ label_mapping = {
     label: int(idx) 
     for label, idx in zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_))
 }
-print(f"Label mapping: {label_mapping}")
+logger.info(f"Label mapping: {label_mapping}")
 
 # Create id2label and label2id with Python integers
 num_labels = len(label_mapping)
 id2label = {int(id): label for label, id in label_mapping.items()}
 label2id = {label: int(id) for id, label in id2label.items()}
 
-print(f"Label mapping: {label_mapping}")
-print(f"Number of classes: {num_labels}")
+logger.info(f"Label mapping: {label_mapping}")
+logger.info(f"Number of classes: {num_labels}")
 
 dataset = Dataset.from_pandas(df)
 
@@ -124,7 +124,7 @@ eval_dataset = dataset["test"]
 model = model.to(device)
 
 # Use a lower batch size for MPS devices
-batch_size = 8 if device.type == "mps" else 16
+batch_size = 16
 
 training_args = TrainingArguments(
     output_dir="./results",
@@ -201,22 +201,34 @@ with mlflow.start_run(run_name=run_name):
     
     # Create signature
     signature = infer_signature(input_array, output_array)
-
-    # Save the model locally
-    trainer.save_model(f"./model/{run_name}")
     
-    # Log the model with MLflow
+    # Save the original forward method if needed
+    original_forward = model.forward
+
+    def patched_forward(x):
+        outputs = original_forward(x)
+        return outputs.logits
+
+    # Override the forward method to return only logits
+    model.forward = patched_forward
+
+    # Log the model with MLflow using the model signature, without passing an input example
     mlflow.pytorch.log_model(
         model, 
         "model",
-        signature=signature,
-        input_example=input_array  # Pass the numpy array directly
+        signature=signature
     )
-
-    # Validate the model input
+    
+    # Prepare an input example as a JSON-compatible n-dimensional array (i.e. a list)
+    input_example = input_array.tolist()
+    
+    # Generate a serving input example from the input example
+    serving_input = mlflow.models.convert_input_example_to_serving_input(input_example)
+    
+    # Validate the model input using the serving input example
     model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
     try:
-        mlflow.models.validate_serving_input(model_uri, input_array)
-        print("Model input validation succeeded")
+        mlflow.models.validate_serving_input(model_uri, serving_input)
+        logger.info("Model input validation succeeded")
     except Exception as e:
-        raise ValueError(f"Model input validation failed: {e}")
+        logger.error(f"Model input validation failed: {e}", exc_info=True)

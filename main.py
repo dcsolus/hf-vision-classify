@@ -99,44 +99,46 @@ model.classifier = torch.nn.Linear(model.config.hidden_size, num_labels)
 torch.nn.init.xavier_uniform_(model.classifier.weight)
 model.classifier.bias.data.fill_(0)
 
-model = model.to(device)
-
 # Define a preprocessing function to handle binary image data.
 def preprocess(example):
-    # Convert binary data to a PIL image and ensure it's in RGB format.
+    # Convert binary data to a PIL image in RGB mode
     image = Image.open(io.BytesIO(example["image"])).convert("RGB")
-    # Process the image using the image processor.
+    # Process the image using the image processor
     processed = image_processor(image, return_tensors="pt")
-    # Remove the batch dimension (which is 1) to get a tensor of shape [C, H, W].
-    example["pixel_values"] = processed["pixel_values"].squeeze()
-    example["pixel_values"] = example["pixel_values"].to(device)
+    # processed["pixel_values"] has shape [1, C, H, W]. Remove the batch dimension, enforce contiguous layout.
+    example["pixel_values"] = processed["pixel_values"].squeeze(0).contiguous().to(device)
     return example
 
-# Apply the preprocessing function to the dataset.
+# Apply the preprocessing function to the dataset
 dataset = dataset.map(preprocess)
 
-# Set the format of the dataset to PyTorch tensors, specifying the columns to include.
+# Set the format of the dataset to PyTorch tensors
 dataset.set_format(type="torch", columns=["pixel_values", "label"])
 
-# Split the dataset into training and evaluation subsets (e.g., an 80-20 split).
+# Split the dataset
 dataset = dataset.train_test_split(test_size=0.2)
 train_dataset = dataset["train"]
 eval_dataset = dataset["test"]
 
-# Define improved training arguments
+# Move model to device after dataset preparation
+model = model.to(device)
+
+# Use a lower batch size for MPS devices
+batch_size = 8 if device.type == "mps" else 16
+
 training_args = TrainingArguments(
     output_dir="./results",
-    per_device_train_batch_size=16,  # Increased from 8
-    per_device_eval_batch_size=16,   # Increased from 8
-    num_train_epochs=5,              # Increased from 3
-    eval_strategy="epoch", # evaluation_strategy="epoch" is deprecated
+    per_device_train_batch_size=batch_size,
+    per_device_eval_batch_size=batch_size,
+    num_train_epochs=5,
+    eval_strategy="epoch",  # evaluation_strategy="epoch" is deprecated but still works
     save_strategy="epoch",
     logging_dir="./logs",
     logging_steps=10,
-    learning_rate=2e-5,             # Added learning rate
-    weight_decay=0.01,              # Added weight decay
-    warmup_ratio=0.1,               # Added warmup
-    load_best_model_at_end=True,    # Load the best model when training ends
+    learning_rate=2e-5,
+    weight_decay=0.01,
+    warmup_ratio=0.1,
+    load_best_model_at_end=True,
     metric_for_best_model="accuracy",
     remove_unused_columns=False,
     report_to=['tensorboard'],
@@ -186,7 +188,7 @@ with mlflow.start_run(run_name=run_name):
 
     # Get a sample input and prepare it for signature
     sample_input = next(iter(eval_dataset))
-    input_tensor = sample_input["pixel_values"].unsqueeze(0)
+    input_tensor = sample_input["pixel_values"].unsqueeze(0).to(device)
     
     # Get model prediction for signature
     with torch.no_grad():

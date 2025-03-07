@@ -213,4 +213,8 @@ with mlflow.start_run(run_name=run_name):
 
     # Validate the model input
     model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
-    mlflow.models.validate_serving_input(model_uri, input_array)
+    try:
+        mlflow.models.validate_serving_input(model_uri, input_array)
+        print("Model input validation succeeded")
+    except Exception as e:
+        raise ValueError(f"Model input validation failed: {e}")
